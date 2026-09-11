@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: dc180-api
+    runtime: python
+    buildCommand: python -m pip install -r requirements.txt
+    startCommand: python -m uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: EVIDENCE_CORPUS
+        value: examples/phase5_sample.jsonl
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-5-mini
+
+  - type: web
+    name: dc180-ui
+    runtime: python
+    buildCommand: python -m pip install -r requirements.txt
+    startCommand: python -m streamlit run ui/app.py --server.address 0.0.0.0 --server.port $PORT
+    envVars:
+      - key: API_BASE_URL
+        sync: false
