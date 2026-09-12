@@ -23,7 +23,7 @@ class SearchResult:
 
 
 class SemanticRetriever:
-    """Lazily keep normalized document embeddings in memory and rank by cosine similarity."""
+    """Lazily keep normalized FastEmbed vectors in memory and rank by cosine similarity."""
 
     def __init__(self, documents: list[dict[str, object]], model_name: str = DEFAULT_MODEL) -> None:
         if not documents:
@@ -46,15 +46,22 @@ class SemanticRetriever:
         with self._load_lock:
             if self._model is not None:
                 return
-            # Keep this import local: importing sentence-transformers imports PyTorch.
-            from sentence_transformers import SentenceTransformer
+            # Keep this import local: FastEmbed initializes its ONNX runtime here.
+            from fastembed import TextEmbedding
 
-            model = SentenceTransformer(self.model_name)
+            model = TextEmbedding(model_name=self.model_name)
             texts = [str(document["text"]) for document in self.documents]
             # Unit-normalized vectors make a dot product exactly equal cosine similarity.
-            embeddings = model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+            embeddings = self._normalized_embeddings(model, texts)
             self._model = model
             self._document_embeddings = embeddings
+
+    @staticmethod
+    def _normalized_embeddings(model: Any, texts: list[str]) -> np.ndarray:
+        """Materialize FastEmbed's generator and explicitly L2-normalize every vector."""
+        embeddings = np.asarray(list(model.embed(texts)), dtype=np.float32)
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        return embeddings / np.where(norms == 0.0, 1.0, norms)
 
     def search(self, query: str, top_k: int = 5) -> list[SearchResult]:
         """Return the highest cosine-similarity documents for a natural-language query."""
@@ -62,7 +69,7 @@ class SemanticRetriever:
             raise ValueError("top_k must be at least 1")
         self._ensure_loaded()
         assert self._model is not None and self._document_embeddings is not None
-        query_embedding = self._model.encode(query, convert_to_numpy=True, normalize_embeddings=True)
+        query_embedding = self._normalized_embeddings(self._model, [query])[0]
         scores = self._document_embeddings @ query_embedding
         ranked_indices = np.argsort(-scores, kind="stable")[:top_k]
         return [SearchResult(self.documents[index], float(scores[index])) for index in ranked_indices]
@@ -81,7 +88,7 @@ def main() -> None:
     parser.add_argument("--corpus", type=Path, required=True, help="Phase 4 JSONL corpus file.")
     parser.add_argument("--query", action="append", required=True, help="Search query; repeat for multiple queries.")
     parser.add_argument("--top-k", type=int, default=5, help="Number of results per query (default: 5).")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Sentence-transformer model (default: {DEFAULT_MODEL}).")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help=f"FastEmbed model (default: {DEFAULT_MODEL}).")
     args = parser.parse_args()
     retriever = SemanticRetriever(load_documents(args.corpus), args.model)
     for query in args.query:
