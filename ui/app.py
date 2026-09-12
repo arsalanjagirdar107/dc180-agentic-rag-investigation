@@ -76,7 +76,7 @@ with search_tab:
 
 with investigation_tab:
     investigation_question = st.text_area("Investigation question", key="investigation_question")
-    policy_label = st.selectbox("Reasoning policy", ["OpenAI via backend environment", "Offline demo fallback"])
+    policy_label = st.selectbox("Reasoning policy", ["Offline demo fallback", "OpenAI via backend environment"])
     if st.button("Run investigation", disabled=not investigation_question):
         policy = "openai" if policy_label.startswith("OpenAI") else "rule"
         response = call_api(base_url, "POST", "/investigate", {"question": investigation_question, "policy": policy, "max_retries": 2, "evidence_limit": 3})
