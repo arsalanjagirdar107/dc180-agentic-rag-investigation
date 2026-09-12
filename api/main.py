@@ -94,7 +94,7 @@ class Backend:
         self.documents = load_documents(corpus_path)
         self.lexical = TfidfRetriever(self.documents)
         self.semantic = SemanticRetriever(self.documents)
-        self.hybrid = HybridRetriever(self.documents)
+        self.hybrid = HybridRetriever(self.documents, semantic_retriever=self.semantic)
         self.graph = EvidenceGraph.from_documents(self.documents)
 
     @staticmethod

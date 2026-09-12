@@ -40,13 +40,14 @@ class HybridRetriever:
         documents: list[dict[str, object]],
         lexical_weight: float = 0.5,
         model_name: str = DEFAULT_MODEL,
+        semantic_retriever: SemanticRetriever | None = None,
     ) -> None:
         if not 0.0 <= lexical_weight <= 1.0:
             raise ValueError("lexical_weight must be between 0 and 1")
         self.documents = documents
         self.lexical_weight = lexical_weight
         self.lexical = TfidfRetriever(documents)
-        self.semantic = SemanticRetriever(documents, model_name)
+        self.semantic = semantic_retriever or SemanticRetriever(documents, model_name)
 
     def search(self, query: str, top_k: int = 5) -> list[HybridResult]:
         """Return a weighted combination of normalized lexical and semantic scores."""
