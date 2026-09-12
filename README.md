@@ -1,219 +1,185 @@
-# Agentic RAG Investigation
+# Solve the Case — An Interactive Agentic RAG Investigation
 
-## Phase 4: document loading and preprocessing
+An evidence-first investigation application built for the 180DC ML recruitment task. It lets a user search a bounded Enron email corpus, run a traceable investigation, challenge the result with a separate Fact-Checker, inspect evidence relationships, and record an independent verdict.
 
-This phase turns a small, local subset of the CMU/CALO Enron Email Dataset into
-a clean JSONL file. No retrieval, embeddings, agents, graph, API, UI, or
-deployment code is included yet.
+**Live demo:** [Streamlit UI](https://dc180-agentic-rag-investigation-ui.onrender.com) · [FastAPI health endpoint](https://dc180-agentic-rag-investigation.onrender.com/health)
 
-### Run
+## Problem
 
-Extract the dataset locally, choose a deliberately bounded directory (or use
-`--include-path` to select one), then run:
+Investigative questions are easy to answer confidently and hard to answer responsibly. This project treats email records as evidence rather than truth: every displayed claim is tied to retrieved document IDs, and corpus records remain explicitly unverified unless an external process verifies them.
 
-```powershell
-python -m preprocessing.enron_loader `
-  --input-dir C:\data\enron_subset `
-  --output-file data\processed\enron_emails.jsonl `
-  --max-documents 200
+## What the system does
+
+- Loads a reproducible subset of Enron-style RFC 822 emails into JSONL.
+- Retrieves evidence with lexical TF-IDF, semantic embeddings, or transparent hybrid retrieval.
+- Runs a bounded Investigator loop that retrieves, forms a theory, assesses evidence, reformulates a query when needed, and validates citations in Python.
+- Runs a separate Fact-Checker that performs new adversarial searches for contradiction, timeline changes, and alternative explanations.
+- Builds an inspectable NetworkX evidence graph with source-document IDs on every evidence-derived edge.
+- Exposes the workflow through FastAPI and a Streamlit UI.
+
+## Architecture
+
+```text
+Enron maildir / sample JSONL
+        │
+        ▼
+Preprocessor ──► canonical JSONL documents ──► lexical TF-IDF retriever
+                                             └► FastEmbed semantic retriever
+                                                        │
+                                                        ▼
+                                      weighted hybrid evidence retriever
+                                             │                    │
+                                             ▼                    ▼
+                                      Investigator          Fact-Checker
+                                      (bounded loop)      (fresh adversarial search)
+                                             │                    │
+                                             └──── FastAPI ───────┘
+                                                       │
+                                                  Streamlit UI
+
+JSONL documents ──► NetworkX evidence graph ──► graph inspection endpoint
 ```
 
-To make a reproducible subset from a larger extracted corpus, constrain both
-the path and the maximum number of documents:
+The graph is an inspection/evidence board, not a retrieval index. Retrieval, retry enforcement, score calculation, graph construction, and citation validation remain deterministic Python responsibilities; language reasoning is optional and policy-driven.
+
+## Corpus and preprocessing
+
+The project targets the public CMU/CALO Enron Email Dataset format: an extracted `maildir` where each file is an RFC 822 email. `preprocessing/enron_loader.py` walks files in deterministic path order, optionally filters by path, extracts `text/plain` content, normalizes whitespace, preserves selected headers, and writes one JSON object per line.
+
+Each processed document contains a stable `document_id`, source path, sender/recipient/date metadata, cleaned body, searchable text, and an `unverified` verification status. For raw maildir records, the ID is a SHA-256-derived value of the relative source path. A small committed, schema-compatible corpus at `examples/phase5_sample.jsonl` makes the deployed demo self-contained. The tests also exercise the preprocessing/retrieval path against a public Enron dataset endpoint when network access is available.
 
 ```powershell
 python -m preprocessing.enron_loader `
   --input-dir C:\data\maildir `
   --include-path allen-p `
+  --output-file data\processed\enron_emails.jsonl `
   --max-documents 200
 ```
 
-The input data is never modified. The output is one JSON object per email,
-with a stable `document_id`, source path, selected headers, cleaned body, and a
-single `text` field that later retrieval code can consume.
+## Retrieval and RAG
 
-## Phase 5: lexical retrieval
+### Lexical retrieval
 
-The lexical retriever reads the Phase 4 JSONL output and ranks emails using
-TF-IDF cosine similarity. It uses only exact word overlap; it does not create
-embeddings or perform semantic or hybrid retrieval.
+`retrieval/lexical.py` implements dependency-free TF-IDF cosine similarity. It is useful when the user's wording overlaps with the source evidence; term frequency is log-scaled so repeated words do not dominate a result.
 
-```powershell
-python -m retrieval.lexical `
-  --corpus data\processed\enron_emails.jsonl `
-  --query "contract approval" `
-  --top-k 5
+### Semantic retrieval
+
+`retrieval/semantic.py` uses FastEmbed's ONNX implementation of `sentence-transformers/all-MiniLM-L6-v2`. Document and query vectors are explicitly L2-normalized, so their dot product is cosine similarity. The model is imported and loaded only on a semantic or hybrid request, behind a lock, and the API shares one `SemanticRetriever` instance with hybrid retrieval.
+
+### Hybrid retrieval
+
+`retrieval/hybrid.py` retrieves all corpus documents from both methods, min-max normalizes each score set per query, then combines them:
+
+```text
+hybrid = lexical_weight × normalized_lexical
+       + (1 - lexical_weight) × normalized_semantic
 ```
 
-Pass `--query` more than once to run several searches. A small schema-identical
-example corpus is available at `examples/phase5_sample.jsonl` for a quick run.
+The default lexical weight is `0.5`. Retrieval scores are ranking signals, not probabilities or factual confidence.
 
-## Phase 6: semantic retrieval
+## Investigation and grounding
 
-Semantic retrieval converts each email and query into a dense embedding using
-the standard `all-MiniLM-L6-v2` sentence-transformer model. It ranks normalized
-embeddings by cosine similarity, which can match related ideas even when they
-do not use the same words. It is separate from, and does not change, the
-Phase 5 lexical retriever.
+The Investigator receives a question and a hybrid retriever. For each attempt it retrieves evidence, asks a reasoning policy for a theory/assessment/next query, validates cited IDs against the retrieved evidence, and only retains grounded claims that are verbatim excerpts of cited evidence. It stops when evidence is sufficient or the configured retry limit is reached. Every attempt is retained in a Pydantic `InvestigationState` for inspection.
 
-Install the one dependency, then run:
+Two policies are available:
+
+- **Offline demo fallback** — the deployed UI default. A deterministic rule policy uses retrieval scores and targeted query hints, so the demo works without an API key.
+- **OpenAI policy** — optional. It uses structured Responses API output, while Python still controls retrieval, retry limits, and grounding validation.
+
+The Fact-Checker is intentionally separate. It turns an Investigator report into three new hybrid searches—contradiction, timeline, and alternative explanation—then validates its supporting, contradicting, and alternative IDs against only that fresh evidence. This separation prevents the checker from merely repeating the Investigator's evidence.
+
+## Evidence graph
+
+`evidence_graph/builder.py` constructs a deterministic NetworkX `MultiDiGraph`. Nodes represent documents, email-address people, email domains/organizations, subject-derived events, and conservatively recognized corpus objects such as contracts and energy trades. Edges represent actual sender/recipient/CC, document-event, and document-entity relationships. Each edge stores `source_document_ids`, enabling a user to trace the relationship back to source evidence.
+
+## API and UI
+
+FastAPI is a thin adapter over the existing modules and uses Pydantic schemas for requests and important structured responses.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health` | Service and corpus status |
+| `POST /ingest` | Local maildir-to-JSONL ingestion and index reload |
+| `POST /search_evidence` | Lexical, semantic, or hybrid evidence search |
+| `POST /interrogate` | Candidate interrogation via evidence search |
+| `POST /investigate` | Bounded Investigator workflow |
+| `POST /fact_check` | Fresh adversarial Fact-Checker workflow |
+| `POST /submit_verdict` | Record a user prediction as `not_evaluated` |
+| `GET /graph/{node_id}` | Traceable graph relationships |
+
+The Streamlit UI is frontend-only and communicates with FastAPI over HTTP. It contains Candidate Interrogation, Evidence Search, Investigation, Fact-Checker, Investigation Graph, and Final Verdict sections. It never reads or displays `OPENAI_API_KEY`.
+
+## Local setup
+
+Requires Python `3.12.12` (pinned in `.python-version`).
 
 ```powershell
 python -m pip install -r requirements.txt
-python -m retrieval.semantic `
-  --corpus data\processed\enron_emails.jsonl `
-  --query "lawyers must approve the deal" `
-  --top-k 5
-```
 
-The first run downloads the model into the local Hugging Face cache.
-
-## Phase 7: hybrid retrieval
-
-Hybrid retrieval runs the existing lexical TF-IDF and semantic retrievers over
-the same Phase 4 corpus. Their per-query scores are min-max normalized to a
-common 0–1 scale, then combined transparently:
-
-`hybrid_score = lexical_weight × lexical_normalized + (1 - lexical_weight) × semantic_normalized`
-
-The default `lexical_weight` is `0.5`. The result reports the document ID,
-combined score, both raw scores, both normalized scores, and the contributing
-retrieval methods.
-
-```powershell
-python -m retrieval.hybrid `
-  --corpus data\processed\enron_emails.jsonl `
-  --query "lawyers must approve the deal" `
-  --top-k 5 `
-  --lexical-weight 0.5
-```
-
-## Phase 8: Investigator Agent
-
-The Investigator is a bounded investigation loop around the hybrid retriever:
-
-1. Retrieve evidence for the current query.
-2. Form a cautious theory and grounded claims from the retrieved text.
-3. Assess whether the retrieved evidence is sufficient under a configurable score threshold.
-4. If it does not, reformulate the query and retry until the retry limit.
-
-It records every attempt in Pydantic state models and returns only claims that
-name their supporting document IDs. The initial reasoning policy is deliberately
-LLM-based and uses the OpenAI Responses API; Python retains retrieval, retry,
-and grounding control. Set `OPENAI_API_KEY` in your environment (and optionally
-`OPENAI_MODEL`) before running it. A `--policy rule` fallback exists only for
-offline local demos and tests.
-
-```powershell
-python -m investigation.investigator `
-  --corpus data\processed\enron_emails.jsonl `
-  --question "attorney clearance before transaction" `
-  --max-retries 2
-```
-
-## Phase 9: Fact-Checker
-
-The separate Fact-Checker reads a saved Investigator JSON report and runs fresh
-adversarial hybrid searches for reversals, timeline changes, and alternative
-explanations. Its structured result cites only documents from those new search
-results.
-
-```powershell
-python -m fact_checking.fact_checker `
-  --corpus data\processed\enron_emails.jsonl `
-  --investigation-file investigation.json
-```
-
-## Phase 10: Evidence Graph
-
-The NetworkX evidence graph is an inspection board, not a retrieval component.
-It adds deterministic nodes for documents, email-address people, email domains,
-subject-backed events, and explicitly mentioned corpus entities. Every edge has
-`source_document_ids` for traceability.
-
-```powershell
-python -m evidence_graph.builder `
-  --corpus data\processed\enron_emails.jsonl `
-  --document-id <document-id>
-```
-
-## Phase 11: FastAPI backend
-
-The API is a thin adapter over the existing preprocessing, retrieval,
-Investigator, Fact-Checker, and evidence-graph modules. Configure the corpus
-with `EVIDENCE_CORPUS` (it defaults to the sample corpus), then run:
-
-```powershell
+# Terminal 1
 python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
-```
 
-Available endpoints are `/health`, `/ingest`, `/search_evidence`,
-`/interrogate`, `/investigate`, `/fact_check`, `/submit_verdict`, and
-`/graph/{node_id}`. `/investigate` defaults to the environment-keyed OpenAI
-policy; use `"policy": "rule"` only for local offline tests.
-
-## Phase 12: Streamlit frontend
-
-The frontend has no retrieval or agent logic. It calls the FastAPI endpoints
-over HTTP and keeps the current investigation and Fact-Checker reports only in
-the browser session.
-
-Start the backend in one terminal:
-
-```powershell
-python -m uvicorn api.main:app --host 0.0.0.0 --port 8000
-```
-
-Then start the UI in another terminal:
-
-```powershell
+# Terminal 2
 python -m streamlit run ui/app.py
 ```
 
-Open the URL Streamlit prints (normally `http://localhost:8501`). Use the
-sidebar connection check first. For a no-key demo, choose **Offline demo
-fallback** in the Investigation tab; production-style investigations use the
-backend's `OPENAI_API_KEY` environment variable.
+Open Streamlit's local URL and use the sidebar connection check. The UI defaults to **Offline demo fallback**. To use the optional LLM policy, configure the key only in the backend environment:
 
-### Manual demo checklist
+```powershell
+$env:OPENAI_API_KEY = "..."
+$env:OPENAI_MODEL = "gpt-5-mini"  # optional
+```
 
-1. Start FastAPI, then Streamlit, and use **Check backend** in the sidebar.
-2. Run an **Evidence Search** and confirm each result shows a document ID.
-3. Run **Investigation** (choose the offline fallback for a no-key demo).
-4. Run the independent **Fact-Checker** and inspect its cited evidence groups.
-5. Enter `document:sample-001` in **Investigation Graph** and inspect source document IDs.
-6. Enter and submit your own **Final Verdict**.
-7. Confirm the recorded prediction is marked not automatically evaluated before reviewing the consolidated result.
+| Variable | Used by | Default | Purpose |
+| --- | --- | --- | --- |
+| `EVIDENCE_CORPUS` | API | `examples/phase5_sample.jsonl` | JSONL corpus path |
+| `API_BASE_URL` | UI | `http://127.0.0.1:8000` | FastAPI base URL |
+| `OPENAI_API_KEY` | API only | unset | Optional OpenAI reasoning/fact-check policy |
+| `OPENAI_MODEL` | API only | `gpt-5-mini` | Optional OpenAI model selection |
 
-## Render deployment
+## Deployment
 
-Deploy the API and UI as two separate Render **Web Services** from this same
-repository. The included `render.yaml` defines both services, or create them
-manually with the settings below. Render uses the pinned Python version in
-`.python-version`.
+`render.yaml` defines two Render web services:
 
-### FastAPI service
+- **API:** `python -m uvicorn api.main:app --host 0.0.0.0 --port $PORT`
+- **UI:** `python -m streamlit run ui/app.py --server.address 0.0.0.0 --server.port $PORT`
 
-- **Build command:** `python -m pip install -r requirements.txt`
-- **Start command:** `python -m uvicorn api.main:app --host 0.0.0.0 --port $PORT`
-- **Environment variables:** set `EVIDENCE_CORPUS=examples/phase5_sample.jsonl`.
-  Add `OPENAI_API_KEY` as a Render secret only when using the OpenAI reasoning
-  policies. `OPENAI_MODEL` is optional and defaults to `gpt-5-mini`.
+Set the UI service's `API_BASE_URL` to the public API URL. The committed sample corpus is used for the deployed demo because free-service disk is ephemeral; `/ingest` remains primarily a local-development operation. FastEmbed avoids the previous PyTorch/SentenceTransformers runtime cost, but a first semantic request may still load/download the ONNX model on a fresh instance.
 
-The small processed sample corpus is committed under `examples/`, so the demo
-starts with traceable corpus evidence and does not need to download or invent
-data. Never commit an API key; it is read only from the API service environment.
+## Testing
 
-### Streamlit service
+```powershell
+python -m unittest discover -s tests -v
+```
 
-- **Build command:** `python -m pip install -r requirements.txt`
-- **Start command:** `python -m streamlit run ui/app.py --server.address 0.0.0.0 --server.port $PORT`
-- **Environment variables:** set `API_BASE_URL` to the public HTTPS URL of the
-  deployed FastAPI service, for example `https://dc180-api.onrender.com`.
+The suite covers API health/search/ingestion/verdict flow, Investigator and Fact-Checker flow, graph traceability, citation status propagation, public-Enron pipeline integration (skipped only when the external dataset is unreachable), lazy shared semantic-model lifecycle, and the Streamlit HTTP client.
 
-`API_BASE_URL` is the only UI-to-API connection setting. Locally, it defaults
-to `http://127.0.0.1:8000`; the Streamlit UI never reads or displays
-`OPENAI_API_KEY`.
+## Implemented bonus-quality features
 
-`/ingest` remains intended for local development because Render's service disk
-is ephemeral. The deployed demo uses the included sample corpus instead.
+- Fresh adversarial Fact-Checker retrieval rather than self-critique only.
+- Python-enforced citation/grounding validation and verbatim-claim checks.
+- Explicit `unverified` and `misleading` evidence status propagation.
+- Traceable NetworkX graph edges retaining source document IDs.
+- Bounded retry loop with inspectable investigation state.
+- Lazy, shared FastEmbed/ONNX embedding runtime suitable for the deployed demo.
+- User verdict recording that is kept separate from system evaluation.
+
+## Limitations and tradeoffs
+
+- The deployed corpus is deliberately tiny and illustrative; it does not establish real-world ground truth.
+- Email evidence is marked unverified by default and can be misleading or incomplete.
+- The offline policies are deterministic fallbacks, not substitutes for nuanced LLM reasoning.
+- Min-max-normalized hybrid scores are query-relative ranking values, not calibrated confidence.
+- The graph uses conservative pattern/metadata extraction rather than unrestricted entity extraction.
+- There is no persistent database or long-term verdict storage; Render disk is ephemeral.
+- The optional OpenAI policy depends on a valid backend-only API key and available account access.
+
+## AI tools used
+
+OpenAI Codex was used as an AI coding assistant during iterative implementation, debugging, test support, and documentation preparation. Architecture decisions, evidence constraints, deployment checks, and final QA were reviewed against the working code and test results.
+
+## Submission companion documents
+
+- [Technical report](docs/TECHNICAL_REPORT.md)
+- [7–10 minute demo script](docs/DEMO_SCRIPT.md)
+- [Interview cheat sheet](docs/INTERVIEW_CHEATSHEET.md)

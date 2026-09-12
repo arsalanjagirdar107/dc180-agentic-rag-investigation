@@ -1,5 +1,8 @@
 {
   "state": {"question": "Was the energy trade approved?", "max_retries": 0, "attempts": [], "status": "sufficient"},
-  "final_theory": {"statement": "The energy trade had legal approval.", "supporting_document_ids": ["sample-001"]},
-  "grounded_claims": [{"claim": "Please send the contract to legal for approval before the energy trade is executed.", "supporting_document_ids": ["sample-001"]}]
+  "final_theory": {"statement": "The available evidence indicates that legal approval was pending and the energy trade was not authorized for execution.", "supporting_document_ids": ["sample-004"]},
+  "grounded_claims": [
+    {"claim": "Legal approval is pending and the prior approval was withdrawn until the revised contract is reviewed.", "supporting_document_ids": ["sample-004"]},
+    {"claim": "Do not execute the energy trade.", "supporting_document_ids": ["sample-004"]}
+  ]
 }
