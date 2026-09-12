@@ -181,5 +181,3 @@ OpenAI Codex was used as an AI coding assistant during iterative implementation,
 ## Submission companion documents
 
 - [Technical report](docs/TECHNICAL_REPORT.md)
-- [7–10 minute demo script](docs/DEMO_SCRIPT.md)
-- [Interview cheat sheet](docs/INTERVIEW_CHEATSHEET.md)
